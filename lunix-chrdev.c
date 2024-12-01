@@ -69,7 +69,7 @@ static int lunix_chrdev_state_update(struct lunix_chrdev_state_struct *state)
 	
 	debug("entering update\n");
 	
-	//If no refresh needed then stop
+	/*If no refresh is needed then stop and return "try again" */
 
 	if(!lunix_chrdev_state_needs_refresh(state)){
 		return -EAGAIN;
@@ -87,6 +87,8 @@ static int lunix_chrdev_state_update(struct lunix_chrdev_state_struct *state)
 	spin_unlock_irqrestore(&sensor->lock, cpu_flags);
 	debug("Spinlock just unlocked\n");
 
+	/*Whats our measurement type? Use lookup tables to make it decimal human readable*/
+
 	switch (state->type){
 	case BATT:
 		fixed_value = lookup_voltage[new_value];
@@ -101,6 +103,7 @@ static int lunix_chrdev_state_update(struct lunix_chrdev_state_struct *state)
 		debug("lookup : rubbish");
 	}
 
+	/*Split integers and decimals*/
 
 	debug("Fixed value = %ld\n", fixed_value);
 
@@ -109,14 +112,15 @@ static int lunix_chrdev_state_update(struct lunix_chrdev_state_struct *state)
 
 	debug("Final value = %d.%d\n", integer_part, decimal_part);
 
+	/*Copy to buffer with respect to its capacity*/
 	state->buf_lim = snprintf(state->buf_data, LUNIX_CHRDEV_BUFSZ, "%d.%d\n", integer_part, decimal_part);
 
 
 	if(state->buf_lim >= LUNIX_CHRDEV_BUFSZ){
-		debug("snprintf truncated string\n");
+		debug("buffer length exceeded: snprintf truncated string\n");
 	}
 
-
+	/*Update new timestamp*/
 	state->buf_timestamp = ktime_get_real_seconds();
 	
 	debug("leaving\n");
@@ -138,8 +142,11 @@ static int lunix_chrdev_open(struct inode *inode, struct file *filp)
 
 	debug("fez: entering\n");
 	ret = -ENODEV;
-	if ((ret = nonseekable_open(inode, filp)) < 0)
+
+	/*Check if we have a correct device outherwise go to out*/
+	if ((ret = nonseekable_open(inode, filp)) < 0){
 		goto out;
+	}
 
 	/*
 	 * Associate this open file with the relevant sensor based on
@@ -150,13 +157,14 @@ static int lunix_chrdev_open(struct inode *inode, struct file *filp)
 	type = iminor(inode) % 8;
 	debug("fez: sensorId is  = %d\n", sensor_id);
 	debug("fez: type is  = %d\n", type);
+
+	/*if we have bigger sensor number than allowed then return no device*/
 	if(type >= N_LUNIX_MSR){
 		ret = -ENODEV;
 		goto out;
 	}
 
 	/* Allocate a new Lunix character device private state structure */
-
 	new_state = kmalloc(sizeof(struct lunix_chrdev_state_struct), GFP_KERNEL);
         /* Error handling */
 	if(!new_state){
@@ -165,6 +173,8 @@ static int lunix_chrdev_open(struct inode *inode, struct file *filp)
 		ret = -EFAULT;
 		goto out; 
 	}
+
+	/*Define our new state stuct*/
 
 	new_state->type = type;
 	new_state->sensor = &lunix_sensors[sensor_id];
@@ -194,10 +204,11 @@ static long lunix_chrdev_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t cnt, loff_t *f_pos)
 {
 	ssize_t ret;
-
 	struct lunix_sensor_struct *sensor;
 	struct lunix_chrdev_state_struct *state;
 
+
+	/*Warnings on differences in state and sensor between file and cached data*/
 	state = filp->private_data;
 	WARN_ON(!state);
 
@@ -206,12 +217,12 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 
 	debug("Fez is in read\n");
 
-	/* Lock? */
+	/* Lock */
 	if(down_interruptible(&state->lock)){
 		return -ERESTARTSYS;
 	}
 
-
+	/*Utilise f_pos to discover if we need to print to user*/
 	if (*f_pos == 0) {
 		while (lunix_chrdev_state_update(state) == -EAGAIN) {
 			up(&state->lock);
@@ -222,7 +233,6 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 				return -ERESTARTSYS;
 			}
             	
-
 			if (down_interruptible(&state->lock)){
 					return -ERESTARTSYS; 	/* Lock because other procs may have the same state with you */
 
@@ -231,16 +241,16 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 	}
 
 	/* End of file */
-	/* ? */
 	
 	/* Determine the number of cached bytes to copy to userspace */
-	/* ? */
 
+	/*No bytes read go print 0*/
 	if(state->buf_lim == 0){
 		ret = 0;
 		goto out;
 	}
 
+	/*If our buf lim is smaller than count then print only the ones we can print*/
 	int temp = state->buf_lim - *f_pos;
 	if(temp < cnt) {
 		cnt = temp;
@@ -248,13 +258,15 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 
 	debug("Start printing to user\n");
 
-
+	/*Use copy_t0_user to send the data to user space buffer*/
 	if(copy_to_user(usrbuf, state->buf_data + *f_pos, cnt)){
 		ret = -EFAULT;
 		goto out;
 	}
 	debug("completed print to user\n");
 
+
+	/*Update new f_pos after printing*/
 	*f_pos += cnt;
 
 	if (*f_pos >= state->buf_lim){
@@ -262,7 +274,8 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 		ret = cnt;
 		goto out;
 	}
-		
+
+	/*Return amount of bytes read*/	
 	ret = cnt;
 
 out:
